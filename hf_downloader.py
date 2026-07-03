@@ -566,8 +566,9 @@ class MainWindow(QWidget):
         title.addWidget(self.job_status_filter_combo)
         layout.addLayout(title)
 
-        self.jobs_table = QTableWidget(0, 8)
-        self.jobs_table.setHorizontalHeaderLabels(["", "", "", "", "", "", "", ""])
+        self.jobs_table = QTableWidget(0, 9)
+        self.jobs_table.setHorizontalHeaderLabels(["", "", "", "", "", "", "", "", ""])
+        self.jobs_table.verticalHeader().setVisible(False)
         header = self.jobs_table.horizontalHeader()
         header.setSectionsMovable(False)
         for column in range(self.jobs_table.columnCount()):
@@ -583,6 +584,7 @@ class MainWindow(QWidget):
 
     def _connect_signals(self):
         self.search_btn.clicked.connect(self.search_repo)
+        self.query_input.returnPressed.connect(self.search_repo)
         self.query_input.editingFinished.connect(self._persist)
         self.settings_btn.clicked.connect(self.open_settings_dialog)
         self.repo_combo.currentIndexChanged.connect(self._repo_combo_changed)
@@ -619,7 +621,7 @@ class MainWindow(QWidget):
         return value or self.job_status_filter_combo.currentText() or "all"
 
     def _jobs_header_clicked(self, section: int):
-        sort_map = {1: "status", 2: "progress", 4: "size"}
+        sort_map = {2: "status", 3: "progress", 5: "size"}
         sort_column = sort_map.get(section)
         if not sort_column:
             return
@@ -637,7 +639,7 @@ class MainWindow(QWidget):
         self._persist()
 
     def _restore_jobs_column_widths(self):
-        defaults = [260, 120, 120, 240, 150, 110, 260, 360]
+        defaults = [44, 260, 120, 120, 240, 150, 110, 260, 280]
         widths = self.settings.get("jobs_column_widths", defaults)
         self._restoring_jobs_column_widths = True
         try:
@@ -774,6 +776,7 @@ class MainWindow(QWidget):
         )
         self.jobs_table.setHorizontalHeaderLabels(
             [
+                "",
                 self.t("jobs_repository"),
                 self.t("jobs_status"),
                 self.t("jobs_progress"),
@@ -1138,9 +1141,92 @@ class MainWindow(QWidget):
             return
         self.enqueue_job(files, "repo" if len(files) == len(self.current_files) else "files")
 
+    def _matching_repo_job(self, repo_id: str, repo_type: str, revision: str, base_dir: Path) -> Optional[Dict]:
+        base_dir_text = str(base_dir)
+        for job in self.jobs:
+            if (
+                job.get("repo_id") == repo_id
+                and job.get("repo_type", "model") == repo_type
+                and job.get("revision", "main") == revision
+                and job.get("base_dir", "") == base_dir_text
+            ):
+                return job
+        return None
+
+    def _merge_files_into_job(self, job: Dict, files: List[RepoFile], scope: str) -> bool:
+        existing_names = {item.get("name", "") for item in job.get("files", [])}
+        progress_names = {item.get("name", "") for item in job.get("file_progress", [])}
+        added = False
+        for file in files:
+            if file.name in existing_names:
+                continue
+            job.setdefault("files", []).append(asdict(file))
+            if file.name not in progress_names:
+                job.setdefault("file_progress", []).append(
+                    {
+                        "name": file.name,
+                        "status": "Waiting",
+                        "progress": 0,
+                        "bytes_done": 0,
+                        "bytes_total": file.size,
+                        "speed": 0,
+                    }
+                )
+            existing_names.add(file.name)
+            added = True
+
+        if not added:
+            return False
+
+        job["scope"] = "repo" if scope == "repo" or job.get("scope") == "repo" else "files"
+        job["use_token"] = self.use_token_check.isChecked()
+        job["retries"] = self.retry_spin.value()
+        job["timeout"] = self.timeout_spin.value()
+        job["error"] = ""
+        job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        if self.active_job_id != job.get("id"):
+            job["status"] = STATUS_QUEUED
+            job["current_file"] = ""
+            job["speed"] = 0
+        self._recalculate_job_totals(job)
+        return True
+
+    def _recalculate_job_totals(self, job: Dict):
+        files = {item.get("name", ""): int(item.get("size") or 0) for item in job.get("files", [])}
+        total = sum(files.values())
+        done = 0
+        for state in self._job_file_progress(job):
+            name = state.get("name", "")
+            expected = files.get(name, int(state.get("bytes_total") or 0))
+            bytes_done = int(state.get("bytes_done") or 0)
+            if state.get("status") in {"Ready", STATUS_VERIFIED}:
+                done += expected or bytes_done
+            else:
+                done += min(bytes_done, expected) if expected else bytes_done
+        job["bytes_total"] = total
+        job["bytes_done"] = min(done, total) if total else done
+        job["progress"] = int(job["bytes_done"] * 100 / total) if total else 0
+
     def enqueue_job(self, files: List[RepoFile], scope: str):
         if not self.current_repo_id:
             self.show_error(self.t("load_repo_first"))
+            return
+        base_dir = self.base_dir_for_repo(self.current_repo_id)
+        existing_job = self._matching_repo_job(
+            self.current_repo_id,
+            self.repo_type(),
+            self.revision(),
+            base_dir,
+        )
+        if existing_job:
+            if self._merge_files_into_job(existing_job, files, scope):
+                self.expanded_jobs.add(existing_job["id"])
+                self.jobs = [existing_job] + [
+                    job for job in self.jobs if job.get("id") != existing_job.get("id")
+                ]
+                self._persist()
+                self._refresh_jobs_table()
+                self._start_next_queued_job()
             return
         job = {
             "id": str(uuid.uuid4()),
@@ -1163,7 +1249,7 @@ class MainWindow(QWidget):
                 }
                 for item in files
             ],
-            "base_dir": str(self.base_dir_for_repo(self.current_repo_id)),
+            "base_dir": str(base_dir),
             "status": STATUS_QUEUED,
             "progress": 0,
             "bytes_done": 0,
@@ -1205,8 +1291,9 @@ class MainWindow(QWidget):
         for job in self.visible_jobs():
             self.jobs_table.insertRow(row)
             is_expanded = job.get("id") in self.expanded_jobs
-            expand_label = self.t("hide") if is_expanded else self.t("show")
+            expand_label = "-" if is_expanded else "+"
             values = [
+                expand_label if (job.get("file_progress") or job.get("files")) else "",
                 job.get("repo_id", ""),
                 job.get("status", ""),
                 "",
@@ -1218,9 +1305,14 @@ class MainWindow(QWidget):
             for col, value in enumerate(values):
                 item = self.table_item(value)
                 item.setData(Qt.UserRole, job.get("id", ""))
-                if col in {1, 4}:
+                if col in {0, 2, 5}:
                     item.setTextAlignment(Qt.AlignCenter)
                 if col == 0:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setToolTip(expand_label)
+                if col == 1:
                     item.setForeground(QBrush(Qt.blue))
                     font = item.font()
                     font.setUnderline(True)
@@ -1234,7 +1326,7 @@ class MainWindow(QWidget):
             progress.setFormat("%p%")
             progress.setToolTip(f"{int(job.get('progress') or 0)}%")
             progress.setStyleSheet(self.progress_style(job.get("status", ""), int(job.get("progress") or 0)))
-            self.jobs_table.setCellWidget(row, 2, progress)
+            self.jobs_table.setCellWidget(row, 3, progress)
 
             actions = QWidget()
             actions_layout = QHBoxLayout()
@@ -1244,26 +1336,22 @@ class MainWindow(QWidget):
             cancel_btn = QPushButton(self.t("cancel"))
             open_btn = QPushButton(self.t("open"))
             remove_btn = QPushButton(self.t("remove"))
-            expand_btn = QPushButton(expand_label)
             active = self.active_job_id == job.get("id")
             resume_btn.setEnabled(not active and job.get("status") != STATUS_VERIFIED)
             cancel_btn.setEnabled(active)
             remove_btn.setEnabled(not active)
-            expand_btn.setEnabled(bool(job.get("file_progress") or job.get("files")))
 
-            expand_btn.clicked.connect(lambda checked=False, jid=job["id"]: self.toggle_job_expanded(jid))
             resume_btn.clicked.connect(lambda checked=False, jid=job["id"]: self.resume_job(jid))
             cancel_btn.clicked.connect(lambda checked=False, jid=job["id"]: self.cancel_job(jid))
             open_btn.clicked.connect(lambda checked=False, folder=job.get("base_dir", ""): self.open_folder(Path(folder)))
             remove_btn.clicked.connect(lambda checked=False, jid=job["id"]: self.remove_job(jid))
 
-            actions_layout.addWidget(expand_btn)
             actions_layout.addWidget(resume_btn)
             actions_layout.addWidget(cancel_btn)
             actions_layout.addWidget(open_btn)
             actions_layout.addWidget(remove_btn)
             actions.setLayout(actions_layout)
-            self.jobs_table.setCellWidget(row, 7, actions)
+            self.jobs_table.setCellWidget(row, 8, actions)
             row += 1
 
             if is_expanded:
@@ -1334,8 +1422,6 @@ class MainWindow(QWidget):
         )
 
     def _jobs_table_clicked(self, row: int, column: int):
-        if column != 0:
-            return
         item = self.jobs_table.item(row, column)
         if not item:
             return
@@ -1344,6 +1430,12 @@ class MainWindow(QWidget):
             return
         job = self._find_job(job_id)
         if not job:
+            return
+        if column == 0:
+            if job.get("file_progress") or job.get("files"):
+                self.toggle_job_expanded(job_id)
+            return
+        if column != 1:
             return
         QDesktopServices.openUrl(
             QUrl(make_repo_url(job.get("repo_id", ""), job.get("repo_type", "model")))
@@ -1367,12 +1459,15 @@ class MainWindow(QWidget):
     def _insert_file_progress_row(self, row: int, file_state: Dict):
         self.jobs_table.insertRow(row)
         file_name = file_state.get("name", "")
+        expand_item = self.table_item("")
+        expand_item.setData(Qt.UserRole, "")
+        self.jobs_table.setItem(row, 0, expand_item)
         name_item = self.table_item(f"  - {file_name}", file_name)
         name_item.setData(Qt.UserRole, "")
-        self.jobs_table.setItem(row, 0, name_item)
+        self.jobs_table.setItem(row, 1, name_item)
         status_item = self.table_item(file_state.get("status", ""))
         status_item.setTextAlignment(Qt.AlignCenter)
-        self.jobs_table.setItem(row, 1, status_item)
+        self.jobs_table.setItem(row, 2, status_item)
 
         progress = QProgressBar()
         progress.setRange(0, 100)
@@ -1381,21 +1476,21 @@ class MainWindow(QWidget):
         progress.setFormat("%p%")
         progress.setToolTip(f"{file_progress}%")
         progress.setStyleSheet(self.progress_style(file_state.get("status", ""), file_progress))
-        self.jobs_table.setCellWidget(row, 2, progress)
+        self.jobs_table.setCellWidget(row, 3, progress)
 
-        self.jobs_table.setItem(row, 3, self.table_item(file_name))
+        self.jobs_table.setItem(row, 4, self.table_item(file_name))
         size_text = (
             f"{human_size(int(file_state.get('bytes_done') or 0))} / "
             f"{human_size(int(file_state.get('bytes_total') or 0))}"
         )
         size_item = self.table_item(size_text)
         size_item.setTextAlignment(Qt.AlignCenter)
-        self.jobs_table.setItem(row, 4, size_item)
+        self.jobs_table.setItem(row, 5, size_item)
         speed_item = self.table_item(human_speed(float(file_state.get("speed") or 0)))
         speed_item.setTextAlignment(Qt.AlignCenter)
-        self.jobs_table.setItem(row, 5, speed_item)
-        self.jobs_table.setItem(row, 6, self.table_item(""))
+        self.jobs_table.setItem(row, 6, speed_item)
         self.jobs_table.setItem(row, 7, self.table_item(""))
+        self.jobs_table.setItem(row, 8, self.table_item(""))
 
     def toggle_job_expanded(self, job_id: str):
         if job_id in self.expanded_jobs:
@@ -1617,6 +1712,21 @@ class MainWindow(QWidget):
                 },
             )
             self._emit_job_progress(job_id, completed_before, total_bytes, 0)
+
+        latest_job = self._find_job(job_id)
+        latest_files = latest_job.get("files", []) if latest_job else []
+        if len(latest_files) > len(files):
+            if latest_job:
+                self._recalculate_job_totals(latest_job)
+            self.signals.job_update.emit(
+                job_id,
+                {
+                    "status": STATUS_QUEUED,
+                    "speed": 0,
+                    "current_file": "",
+                },
+            )
+            return
 
         self.signals.job_update.emit(
             job_id,

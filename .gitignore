@@ -1,5 +1,5 @@
 venv/
-.codex_tmp_appdata/
+.codex_tmp_appdata*/
 __pycache__/
 *.py[cod]
 *.tmp
