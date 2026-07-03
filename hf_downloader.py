@@ -46,6 +46,8 @@ USER_DATA_DIR = Path(
 ) / "HuggingFace Downloader"
 SETTINGS_PATH = USER_DATA_DIR / "settings.json"
 APP_VERSION = 2
+JOBS_COLUMN_DEFAULT_WIDTHS = [44, 280, 120, 120, 260, 170, 120, 280, 430]
+JOBS_COLUMN_MIN_WIDTHS = [44, 180, 96, 100, 160, 130, 90, 180, 400]
 
 STATUS_QUEUED = "Queued"
 STATUS_DOWNLOADING = "Downloading"
@@ -586,6 +588,7 @@ class MainWindow(QWidget):
         self.jobs_table.verticalHeader().setVisible(False)
         header = self.jobs_table.horizontalHeader()
         header.setSectionsMovable(False)
+        header.setMinimumSectionSize(44)
         for column in range(self.jobs_table.columnCount()):
             header.setSectionResizeMode(column, QHeaderView.Interactive)
         self._restore_jobs_column_widths()
@@ -651,15 +654,26 @@ class MainWindow(QWidget):
     def _jobs_column_resized(self, _section: int, _old_size: int, _new_size: int):
         if self._restoring_jobs_column_widths:
             return
+        self._enforce_jobs_column_min_widths()
         self._persist()
 
     def _restore_jobs_column_widths(self):
-        defaults = [44, 260, 120, 120, 240, 150, 110, 260, 280]
-        widths = self.settings.get("jobs_column_widths", defaults)
+        widths = self.settings.get("jobs_column_widths", JOBS_COLUMN_DEFAULT_WIDTHS)
         self._restoring_jobs_column_widths = True
         try:
             for column, width in enumerate(widths[: self.jobs_table.columnCount()]):
-                self.jobs_table.setColumnWidth(column, max(60, int(width)))
+                minimum = JOBS_COLUMN_MIN_WIDTHS[column]
+                default = JOBS_COLUMN_DEFAULT_WIDTHS[column]
+                self.jobs_table.setColumnWidth(column, max(minimum, int(width or default)))
+        finally:
+            self._restoring_jobs_column_widths = False
+
+    def _enforce_jobs_column_min_widths(self):
+        self._restoring_jobs_column_widths = True
+        try:
+            for column, minimum in enumerate(JOBS_COLUMN_MIN_WIDTHS[: self.jobs_table.columnCount()]):
+                if self.jobs_table.columnWidth(column) < minimum:
+                    self.jobs_table.setColumnWidth(column, minimum)
         finally:
             self._restoring_jobs_column_widths = False
 
@@ -1344,13 +1358,17 @@ class MainWindow(QWidget):
             self.jobs_table.setCellWidget(row, 3, progress)
 
             actions = QWidget()
+            actions.setMinimumWidth(JOBS_COLUMN_MIN_WIDTHS[8])
             actions_layout = QHBoxLayout()
-            actions_layout.setContentsMargins(0, 0, 0, 0)
-
+            actions_layout.setContentsMargins(4, 0, 4, 0)
+            actions_layout.setSpacing(4)
             resume_btn = QPushButton(self.t("resume"))
             cancel_btn = QPushButton(self.t("cancel"))
             open_btn = QPushButton(self.t("open"))
             remove_btn = QPushButton(self.t("remove"))
+            for button in (resume_btn, cancel_btn, open_btn, remove_btn):
+                button.setMinimumWidth(88)
+                button.setToolTip(button.text())
             active = self.active_job_id == job.get("id")
             resume_btn.setEnabled(not active and job.get("status") != STATUS_VERIFIED)
             cancel_btn.setEnabled(active)
