@@ -1,0 +1,6 @@
+venv/
+.codex_tmp_appdata/
+__pycache__/
+*.py[cod]
+*.tmp
+hf_downloader_settings.json
