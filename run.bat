@@ -7,12 +7,33 @@ if not exist "venv\Scripts\python.exe" (
     echo Creating virtual environment for HuggingFace Downloader v1.01...
     py -3 -m venv venv
     if errorlevel 1 (
+        python -m venv venv
+    )
+    if errorlevel 1 (
         echo Failed to create virtual environment. Make sure Python is installed.
         pause
         exit /b 1
     )
+)
 
+"venv\Scripts\python.exe" -c "import requests, huggingface_hub, PySide6" >nul 2>nul
+if errorlevel 1 (
     echo Installing dependencies...
+    "venv\Scripts\python.exe" -m pip --version >nul 2>nul
+    if errorlevel 1 (
+        echo Existing virtual environment is incomplete. Recreating it...
+        rmdir /s /q venv
+        py -3 -m venv venv
+        if errorlevel 1 (
+            python -m venv venv
+        )
+        if errorlevel 1 (
+            echo Failed to recreate virtual environment. Make sure Python is installed.
+            pause
+            exit /b 1
+        )
+    )
+
     "venv\Scripts\python.exe" -m pip install --upgrade pip
     if errorlevel 1 (
         echo Failed to upgrade pip.
@@ -26,6 +47,13 @@ if not exist "venv\Scripts\python.exe" (
         pause
         exit /b 1
     )
+)
+
+"venv\Scripts\python.exe" -c "import requests, huggingface_hub, PySide6" >nul 2>nul
+if errorlevel 1 (
+    echo Dependencies are still missing. Please check the installation output above.
+    pause
+    exit /b 1
 )
 
 echo Starting HuggingFace Downloader v1.01...
