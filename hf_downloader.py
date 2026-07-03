@@ -235,11 +235,11 @@ def human_speed(bytes_per_second: float) -> str:
 
 def load_settings() -> Dict:
     data = read_settings_file(SETTINGS_PATH)
-    if data is None and LEGACY_SETTINGS_PATH.exists():
-        data = read_settings_file(LEGACY_SETTINGS_PATH)
-        if data is not None:
-            data["migrated_from"] = str(LEGACY_SETTINGS_PATH)
-            save_settings(data)
+    local_data = read_settings_file(LEGACY_SETTINGS_PATH)
+    if local_data is not None and local_data.get("jobs") and not (data or {}).get("jobs"):
+        data = local_data
+        data["migrated_from"] = str(LEGACY_SETTINGS_PATH)
+        save_settings(data)
 
     if data is None:
         data = {}
@@ -251,7 +251,7 @@ def read_settings_file(path: Path) -> Optional[Dict]:
     if not path.exists():
         return None
     try:
-        with path.open("r", encoding="utf-8") as f:
+        with path.open("r", encoding="utf-8-sig") as f:
             data = json.load(f)
         return data if isinstance(data, dict) else None
     except Exception:
