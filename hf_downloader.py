@@ -258,15 +258,30 @@ def read_settings_file(path: Path) -> Optional[Dict]:
         return None
 
 
+def write_settings_payload(path: Path, payload: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp_path.write_text(payload, encoding="utf-8")
+    try:
+        tmp_path.replace(path)
+    except PermissionError:
+        try:
+            path.write_text(payload, encoding="utf-8")
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+
+
 def save_settings(settings: Dict):
     settings["version"] = APP_VERSION
-    USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp_path = SETTINGS_PATH.with_suffix(".tmp")
-    tmp_path.write_text(
-        json.dumps(settings, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    tmp_path.replace(SETTINGS_PATH)
+    payload = json.dumps(settings, indent=2, ensure_ascii=False)
+    try:
+        write_settings_payload(SETTINGS_PATH, payload)
+    except OSError:
+        try:
+            write_settings_payload(LEGACY_SETTINGS_PATH, payload)
+        except OSError:
+            pass
 
 
 def repo_type_arg(repo_type: str) -> Optional[str]:
