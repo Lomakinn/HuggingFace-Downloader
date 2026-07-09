@@ -46,8 +46,8 @@ USER_DATA_DIR = Path(
 ) / "HuggingFace Downloader"
 SETTINGS_PATH = USER_DATA_DIR / "settings.json"
 APP_VERSION = 2
-JOBS_COLUMN_DEFAULT_WIDTHS = [44, 280, 120, 120, 260, 170, 120, 280, 430]
-JOBS_COLUMN_MIN_WIDTHS = [44, 180, 96, 100, 160, 130, 90, 180, 400]
+JOBS_COLUMN_DEFAULT_WIDTHS = [44, 280, 120, 120, 260, 170, 120, 280, 540]
+JOBS_COLUMN_MIN_WIDTHS = [44, 180, 96, 100, 160, 130, 90, 180, 510]
 
 STATUS_QUEUED = "Queued"
 STATUS_DOWNLOADING = "Downloading"
@@ -55,6 +55,7 @@ STATUS_INTERRUPTED = "Interrupted"
 STATUS_FAILED = "Failed"
 STATUS_VERIFIED = "Verified"
 STATUS_CANCELED = "Canceled"
+STATUS_MISSING = "Missing files"
 
 FILTERS = {
     "All files": None,
@@ -122,6 +123,10 @@ TRANSLATIONS = {
         "resume": "Resume",
         "cancel": "Cancel",
         "remove": "Remove",
+        "remove_with_files": "Delete files",
+        "delete_files_title": "Delete downloaded files?",
+        "delete_files_confirm": "Delete {count} downloaded file(s) from disk and remove this history entry?",
+        "files_missing": "Files missing",
         "open_repo_tooltip": "Open repository in browser",
         "enter_repo": "Enter a model name or full repo id.",
         "check_file": "Check at least one file.",
@@ -175,6 +180,10 @@ TRANSLATIONS = {
         "resume": "Продолжить",
         "cancel": "Отмена",
         "remove": "Удалить",
+        "remove_with_files": "Удалить файлы",
+        "delete_files_title": "Удалить скачанные файлы?",
+        "delete_files_confirm": "Удалить с диска скачанные файлы ({count}) и убрать эту запись из истории?",
+        "files_missing": "Файлы отсутствуют",
         "open_repo_tooltip": "Открыть репозиторий в браузере",
         "enter_repo": "Введите имя модели или полный repo id.",
         "check_file": "Отметьте хотя бы один файл.",
@@ -329,6 +338,18 @@ def local_state(path: Path, expected_size: int) -> tuple[str, int]:
     return "Mismatch", size
 
 
+def safe_child_path(base_dir: Path, name: str) -> Optional[Path]:
+    if not name:
+        return None
+    base = base_dir.resolve()
+    candidate = base / name
+    try:
+        candidate.parent.resolve().relative_to(base)
+    except (OSError, ValueError):
+        return None
+    return candidate
+
+
 class DownloadCanceled(Exception):
     pass
 
@@ -434,6 +455,8 @@ class MainWindow(QWidget):
         self._restore_window_state()
         self._apply_theme(self.settings.get("theme", "System"))
         self.apply_language()
+        if self._reconcile_jobs_with_disk():
+            self._persist()
         self._refresh_jobs_table()
 
     def settings_language_default(self) -> str:
@@ -847,6 +870,69 @@ class MainWindow(QWidget):
         if changed:
             self._persist()
 
+    def _reconcile_jobs_with_disk(self) -> bool:
+        changed = False
+        for job in self.jobs:
+            if job.get("status") not in {STATUS_VERIFIED, STATUS_MISSING}:
+                continue
+            base_dir = Path(job.get("base_dir", ""))
+            if not job.get("file_progress"):
+                job["file_progress"] = self._job_file_progress(job)
+            progress_by_name = {
+                item.get("name", ""): item
+                for item in job["file_progress"]
+            }
+            total = 0
+            done = 0
+            has_missing = False
+            for file_data in job.get("files", []):
+                name = file_data.get("name", "")
+                expected = int(file_data.get("size") or 0)
+                total += expected
+                path = safe_child_path(base_dir, name)
+                state, size = local_state(path, expected) if path else ("Missing", 0)
+                file_progress = progress_by_name.get(name)
+                if file_progress is None:
+                    file_progress = {"name": name}
+                    job.setdefault("file_progress", []).append(file_progress)
+                is_ready = state in {"Ready", "Present"}
+                if is_ready:
+                    file_status = STATUS_VERIFIED
+                    file_done = expected or size
+                    file_percent = 100
+                else:
+                    has_missing = True
+                    file_status = "Partial" if size > 0 else "Missing"
+                    file_done = min(size, expected) if expected else size
+                    file_percent = int(file_done * 100 / expected) if expected else 0
+                new_state = {
+                    "status": file_status,
+                    "progress": file_percent,
+                    "bytes_done": file_done,
+                    "bytes_total": expected or size,
+                    "speed": 0,
+                }
+                if any(file_progress.get(key) != value for key, value in new_state.items()):
+                    file_progress.update(new_state)
+                    changed = True
+                done += file_done
+
+            new_status = STATUS_MISSING if has_missing else STATUS_VERIFIED
+            new_progress = int(done * 100 / total) if total else (100 if not has_missing else 0)
+            job_state = {
+                "status": new_status,
+                "progress": max(0, min(100, new_progress)),
+                "bytes_done": min(done, total) if total else done,
+                "bytes_total": total,
+                "speed": 0,
+                "error": self.t("files_missing") if has_missing else "",
+            }
+            if any(job.get(key) != value for key, value in job_state.items()):
+                job.update(job_state)
+                job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                changed = True
+        return changed
+
     def _persist(self):
         self.settings["jobs"] = self.jobs[:300]
         self.settings["expanded_jobs"] = list(self.expanded_jobs)
@@ -1075,6 +1161,9 @@ class MainWindow(QWidget):
             }
             self.selection_initialized = True
         self._refresh_files_table(preserve_current=False)
+        if self._reconcile_jobs_with_disk():
+            self._persist()
+            self._refresh_jobs_table()
 
     def _filter_accepts(self, item: RepoFile) -> bool:
         pattern = FILTERS.get(self.file_filter_combo.currentText())
@@ -1380,23 +1469,29 @@ class MainWindow(QWidget):
             cancel_btn = QPushButton(self.t("cancel"))
             open_btn = QPushButton(self.t("open"))
             remove_btn = QPushButton(self.t("remove"))
-            for button in (resume_btn, cancel_btn, open_btn, remove_btn):
+            delete_files_btn = QPushButton(self.t("remove_with_files"))
+            for button in (resume_btn, cancel_btn, open_btn, remove_btn, delete_files_btn):
                 button.setMinimumWidth(88)
                 button.setToolTip(button.text())
             active = self.active_job_id == job.get("id")
             resume_btn.setEnabled(not active and job.get("status") != STATUS_VERIFIED)
             cancel_btn.setEnabled(active)
             remove_btn.setEnabled(not active)
+            delete_files_btn.setEnabled(not active)
 
             resume_btn.clicked.connect(lambda checked=False, jid=job["id"]: self.resume_job(jid))
             cancel_btn.clicked.connect(lambda checked=False, jid=job["id"]: self.cancel_job(jid))
             open_btn.clicked.connect(lambda checked=False, folder=job.get("base_dir", ""): self.open_folder(Path(folder)))
             remove_btn.clicked.connect(lambda checked=False, jid=job["id"]: self.remove_job(jid))
+            delete_files_btn.clicked.connect(
+                lambda checked=False, jid=job["id"]: self.remove_job_with_files(jid)
+            )
 
             actions_layout.addWidget(resume_btn)
             actions_layout.addWidget(cancel_btn)
             actions_layout.addWidget(open_btn)
             actions_layout.addWidget(remove_btn)
+            actions_layout.addWidget(delete_files_btn)
             actions.setLayout(actions_layout)
             self.jobs_table.setCellWidget(row, 8, actions)
             row += 1
@@ -1429,7 +1524,7 @@ class MainWindow(QWidget):
         if selected == "downloaded":
             return progress >= 100 or status == STATUS_VERIFIED
         if selected == "error":
-            return status == STATUS_FAILED
+            return status in {STATUS_FAILED, STATUS_MISSING}
         if selected == "verified":
             return status == STATUS_VERIFIED
         return True
@@ -1438,10 +1533,11 @@ class MainWindow(QWidget):
         order = {
             STATUS_FAILED: 0,
             STATUS_CANCELED: 1,
-            STATUS_INTERRUPTED: 2,
-            STATUS_QUEUED: 3,
-            STATUS_DOWNLOADING: 4,
-            STATUS_VERIFIED: 5,
+            STATUS_MISSING: 2,
+            STATUS_INTERRUPTED: 3,
+            STATUS_QUEUED: 4,
+            STATUS_DOWNLOADING: 5,
+            STATUS_VERIFIED: 6,
         }
         return order.get(job.get("status", ""), 99)
 
@@ -1455,7 +1551,7 @@ class MainWindow(QWidget):
         return job.get("updated_at", "")
 
     def progress_style(self, status: str, progress: int) -> str:
-        if status == STATUS_FAILED:
+        if status in {STATUS_FAILED, STATUS_MISSING}:
             color = "#d93025"
         elif progress >= 100 or status == STATUS_VERIFIED:
             color = "#188038"
@@ -1565,6 +1661,49 @@ class MainWindow(QWidget):
         self.jobs = [job for job in self.jobs if job.get("id") != job_id]
         self._persist()
         self._refresh_jobs_table()
+
+    def remove_job_with_files(self, job_id: str):
+        job = self._find_job(job_id)
+        if not job or self.active_job_id == job_id:
+            return
+        files = job.get("files", [])
+        answer = QMessageBox.question(
+            self,
+            self.t("delete_files_title"),
+            self.t("delete_files_confirm").format(count=len(files)),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        base_dir = Path(job.get("base_dir", "")).resolve()
+        errors = []
+        for file_data in files:
+            path = safe_child_path(base_dir, file_data.get("name", ""))
+            if path is None:
+                errors.append(str(file_data.get("name", "")))
+                continue
+            try:
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+                parent = path.parent
+                while parent != base_dir and parent.is_dir():
+                    try:
+                        parent.rmdir()
+                    except OSError:
+                        break
+                    parent = parent.parent
+            except (OSError, ValueError) as exc:
+                errors.append(f"{path}: {exc}")
+
+        if errors:
+            self.show_error("\n".join(errors))
+            self._reconcile_jobs_with_disk()
+            self._persist()
+            self._refresh_jobs_table()
+            return
+        self.remove_job(job_id)
 
     def _start_next_queued_job(self):
         if self.active_job_id:
