@@ -1183,28 +1183,42 @@ class MainWindow(QWidget):
         return None
 
     def _merge_files_into_job(self, job: Dict, files: List[RepoFile], scope: str) -> bool:
-        existing_names = {item.get("name", "") for item in job.get("files", [])}
-        progress_names = {item.get("name", "") for item in job.get("file_progress", [])}
-        added = False
+        existing_files = {
+            item.get("name", ""): item for item in job.get("files", [])
+        }
+        progress_by_name = {
+            item.get("name", ""): item for item in job.get("file_progress", [])
+        }
         for file in files:
-            if file.name in existing_names:
+            if file.name in existing_files:
+                existing_files[file.name]["size"] = file.size
+                if self.active_job_id != job.get("id"):
+                    progress = progress_by_name.get(file.name)
+                    if progress is not None:
+                        progress.update(
+                            {
+                                "status": "Waiting",
+                                "progress": 0,
+                                "bytes_done": 0,
+                                "bytes_total": file.size,
+                                "speed": 0,
+                            }
+                        )
                 continue
             job.setdefault("files", []).append(asdict(file))
-            if file.name not in progress_names:
-                job.setdefault("file_progress", []).append(
-                    {
-                        "name": file.name,
-                        "status": "Waiting",
-                        "progress": 0,
-                        "bytes_done": 0,
-                        "bytes_total": file.size,
-                        "speed": 0,
-                    }
-                )
-            existing_names.add(file.name)
-            added = True
+            progress = {
+                "name": file.name,
+                "status": "Waiting",
+                "progress": 0,
+                "bytes_done": 0,
+                "bytes_total": file.size,
+                "speed": 0,
+            }
+            job.setdefault("file_progress", []).append(progress)
+            existing_files[file.name] = job["files"][-1]
+            progress_by_name[file.name] = progress
 
-        if not added:
+        if not files:
             return False
 
         job["scope"] = "repo" if scope == "repo" or job.get("scope") == "repo" else "files"
