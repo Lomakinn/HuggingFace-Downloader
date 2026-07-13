@@ -2,6 +2,8 @@
 
 Desktop downloader for Hugging Face repositories with resumable downloads, history, per-file progress, filters, sorting, themes, and EN/RU interface.
 
+![HuggingFace Downloader main window](docs/screenshots/app-main.png)
+
 ## Features
 
 - Search Hugging Face models, datasets, and Spaces.
