@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -48,6 +49,7 @@ SETTINGS_PATH = USER_DATA_DIR / "settings.json"
 APP_VERSION = 2
 JOBS_COLUMN_DEFAULT_WIDTHS = [44, 280, 120, 120, 260, 170, 120, 280, 540]
 JOBS_COLUMN_MIN_WIDTHS = [44, 180, 96, 100, 160, 130, 90, 180, 510]
+REPO_HISTORY_COLUMN_WIDTHS = [320, 100, 120, 170, 120, 320]
 
 STATUS_QUEUED = "Queued"
 STATUS_DOWNLOADING = "Downloading"
@@ -99,7 +101,15 @@ TRANSLATIONS = {
         "refresh_local": "Refresh Local",
         "download_checked": "Download Checked",
         "download_visible": "Download Visible",
-        "downloads_history": "Downloads / History",
+        "downloads_history": "Downloads",
+        "repository_history": "Repository history",
+        "history_repository": "Repository",
+        "history_type": "Type",
+        "history_revision": "Revision",
+        "history_last_used": "Last download",
+        "history_files": "Files",
+        "history_folder": "Folder",
+        "open_repo_second_click": "Click the selected repository again to open it in browser.",
         "status_filter": "Status",
         "status_all": "All",
         "status_downloading": "Downloading",
@@ -156,7 +166,15 @@ TRANSLATIONS = {
         "refresh_local": "Обновить локально",
         "download_checked": "Скачать выбранное",
         "download_visible": "Скачать видимое",
-        "downloads_history": "Загрузки / История",
+        "downloads_history": "Загрузки",
+        "repository_history": "История репозиториев",
+        "history_repository": "Репозиторий",
+        "history_type": "Тип",
+        "history_revision": "Ревизия",
+        "history_last_used": "Последняя загрузка",
+        "history_files": "Файлы",
+        "history_folder": "Папка",
+        "open_repo_second_click": "Нажмите выбранный репозиторий еще раз, чтобы открыть его в браузере.",
         "status_filter": "Статус",
         "status_all": "Все",
         "status_downloading": "Скачивается",
@@ -437,6 +455,7 @@ class MainWindow(QWidget):
         self.settings = load_settings()
         self.language = self.settings_language_default()
         self.jobs: List[Dict] = self.settings.get("jobs", [])
+        self.repo_history: List[Dict] = self.settings.get("repo_history", [])
         self.expanded_jobs = set(self.settings.get("expanded_jobs", []))
         self.current_files: List[RepoFile] = []
         self.checked_file_names = set()
@@ -448,8 +467,10 @@ class MainWindow(QWidget):
         self.jobs_sort_column = self.settings.get("jobs_sort_column")
         self.jobs_sort_ascending = bool(self.settings.get("jobs_sort_ascending", True))
         self._restoring_jobs_column_widths = False
+        self._pending_repo_link = None
 
         self._normalize_jobs_on_start()
+        self._normalize_repo_history()
         self._build_ui()
         self._connect_signals()
         self._restore_window_state()
@@ -595,6 +616,10 @@ class MainWindow(QWidget):
     def _build_jobs_panel(self):
         panel = QWidget()
         layout = QVBoxLayout()
+        self.history_tabs = QTabWidget()
+
+        downloads_tab = QWidget()
+        downloads_layout = QVBoxLayout()
         title = QHBoxLayout()
         self.downloads_history_label = QLabel()
         title.addWidget(self.downloads_history_label, 1)
@@ -604,7 +629,7 @@ class MainWindow(QWidget):
         self.job_status_filter_combo.setCurrentText(self.settings.get("job_status_filter", "all"))
         title.addWidget(self.job_status_filter_label)
         title.addWidget(self.job_status_filter_combo)
-        layout.addLayout(title)
+        downloads_layout.addLayout(title)
 
         self.jobs_table = QTableWidget(0, 9)
         self.jobs_table.setHorizontalHeaderLabels(["", "", "", "", "", "", "", "", ""])
@@ -618,7 +643,30 @@ class MainWindow(QWidget):
         self.jobs_table.setAlternatingRowColors(True)
         self.jobs_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.jobs_table.setSelectionBehavior(QTableWidget.SelectRows)
-        layout.addWidget(self.jobs_table)
+        downloads_layout.addWidget(self.jobs_table)
+        downloads_tab.setLayout(downloads_layout)
+
+        history_tab = QWidget()
+        history_layout = QVBoxLayout()
+        self.repo_history_table = QTableWidget(0, 6)
+        self.repo_history_table.setHorizontalHeaderLabels(["", "", "", "", "", ""])
+        self.repo_history_table.verticalHeader().setVisible(False)
+        history_header = self.repo_history_table.horizontalHeader()
+        history_header.setSectionsMovable(False)
+        history_header.setMinimumSectionSize(80)
+        for column in range(self.repo_history_table.columnCount()):
+            history_header.setSectionResizeMode(column, QHeaderView.Interactive)
+        for column, width in enumerate(REPO_HISTORY_COLUMN_WIDTHS):
+            self.repo_history_table.setColumnWidth(column, width)
+        self.repo_history_table.setAlternatingRowColors(True)
+        self.repo_history_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.repo_history_table.setSelectionBehavior(QTableWidget.SelectRows)
+        history_layout.addWidget(self.repo_history_table)
+        history_tab.setLayout(history_layout)
+
+        self.history_tabs.addTab(downloads_tab, "")
+        self.history_tabs.addTab(history_tab, "")
+        layout.addWidget(self.history_tabs)
 
         panel.setLayout(layout)
         return panel
@@ -637,6 +685,7 @@ class MainWindow(QWidget):
         self.download_selected_btn.clicked.connect(self.download_checked_files)
         self.download_visible_btn.clicked.connect(self.download_visible_files)
         self.jobs_table.cellClicked.connect(self._jobs_table_clicked)
+        self.repo_history_table.cellClicked.connect(self._repo_history_table_clicked)
         self.jobs_table.horizontalHeader().sectionClicked.connect(self._jobs_header_clicked)
         self.jobs_table.horizontalHeader().sectionResized.connect(self._jobs_column_resized)
 
@@ -690,6 +739,7 @@ class MainWindow(QWidget):
                 self.jobs_table.setColumnWidth(column, max(minimum, int(width or default)))
         finally:
             self._restoring_jobs_column_widths = False
+        self._pending_repo_link = None
 
     def _enforce_jobs_column_min_widths(self):
         self._restoring_jobs_column_widths = True
@@ -699,6 +749,7 @@ class MainWindow(QWidget):
                     self.jobs_table.setColumnWidth(column, minimum)
         finally:
             self._restoring_jobs_column_widths = False
+        self._pending_repo_link = None
 
     def open_settings_dialog(self):
         dialog = QDialog(self)
@@ -819,6 +870,8 @@ class MainWindow(QWidget):
         self.download_selected_btn.setText(self.t("download_checked"))
         self.download_visible_btn.setText(self.t("download_visible"))
         self.downloads_history_label.setText(self.t("downloads_history"))
+        self.history_tabs.setTabText(0, self.t("downloads_history"))
+        self.history_tabs.setTabText(1, self.t("repository_history"))
         self.job_status_filter_label.setText(self.t("status_filter"))
         self._refresh_job_status_filter_labels()
         if self.status_label.text() in {"Ready", "Готово"}:
@@ -839,6 +892,17 @@ class MainWindow(QWidget):
                 self.t("jobs_actions"),
             ]
         )
+        self.repo_history_table.setHorizontalHeaderLabels(
+            [
+                self.t("history_repository"),
+                self.t("history_type"),
+                self.t("history_revision"),
+                self.t("history_last_used"),
+                self.t("history_files"),
+                self.t("history_folder"),
+            ]
+        )
+        self._refresh_repo_history_table()
 
     def _refresh_job_status_filter_labels(self):
         if not hasattr(self, "job_status_filter_combo"):
@@ -869,6 +933,97 @@ class MainWindow(QWidget):
                 changed = True
         if changed:
             self._persist()
+
+    def _repo_history_key(self, item: Dict) -> tuple:
+        return (
+            item.get("repo_id", ""),
+            item.get("repo_type", "model"),
+            item.get("revision", "main"),
+        )
+
+    def _normalize_repo_history(self):
+        by_key: Dict[tuple, Dict] = {}
+        for item in self.repo_history:
+            repo_id = item.get("repo_id", "")
+            if not repo_id:
+                continue
+            normalized = {
+                "repo_id": repo_id,
+                "repo_type": item.get("repo_type", "model"),
+                "revision": item.get("revision", "main"),
+                "base_dir": item.get("base_dir", ""),
+                "file_count": int(item.get("file_count") or 0),
+                "last_used_at": item.get("last_used_at") or item.get("updated_at") or item.get("created_at") or "",
+            }
+            by_key[self._repo_history_key(normalized)] = normalized
+
+        for job in self.jobs:
+            repo_id = job.get("repo_id", "")
+            if not repo_id:
+                continue
+            item = {
+                "repo_id": repo_id,
+                "repo_type": job.get("repo_type", "model"),
+                "revision": job.get("revision", "main"),
+                "base_dir": job.get("base_dir", ""),
+                "file_count": len(job.get("files", [])),
+                "last_used_at": job.get("updated_at") or job.get("created_at") or "",
+            }
+            key = self._repo_history_key(item)
+            existing = by_key.get(key)
+            if not existing or item["last_used_at"] >= existing.get("last_used_at", ""):
+                by_key[key] = item
+
+        self.repo_history = sorted(
+            by_key.values(),
+            key=lambda item: item.get("last_used_at", ""),
+            reverse=True,
+        )[:500]
+
+    def _remember_repo_history(self, job: Dict):
+        item = {
+            "repo_id": job.get("repo_id", ""),
+            "repo_type": job.get("repo_type", "model"),
+            "revision": job.get("revision", "main"),
+            "base_dir": job.get("base_dir", ""),
+            "file_count": len(job.get("files", [])),
+            "last_used_at": job.get("updated_at") or job.get("created_at") or time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if not item["repo_id"]:
+            return
+        key = self._repo_history_key(item)
+        self.repo_history = [entry for entry in self.repo_history if self._repo_history_key(entry) != key]
+        self.repo_history.insert(0, item)
+        self.repo_history = self.repo_history[:500]
+        if hasattr(self, "repo_history_table"):
+            self._refresh_repo_history_table()
+
+    def _refresh_repo_history_table(self):
+        if not hasattr(self, "repo_history_table"):
+            return
+        self.repo_history_table.setRowCount(0)
+        for row, item in enumerate(self.repo_history):
+            self.repo_history_table.insertRow(row)
+            values = [
+                item.get("repo_id", ""),
+                item.get("repo_type", "model"),
+                item.get("revision", "main"),
+                item.get("last_used_at", ""),
+                str(int(item.get("file_count") or 0)),
+                item.get("base_dir", ""),
+            ]
+            for column, value in enumerate(values):
+                cell = self.table_item(value)
+                cell.setData(Qt.UserRole, row)
+                if column == 0:
+                    cell.setForeground(QBrush(Qt.blue))
+                    font = cell.font()
+                    font.setUnderline(True)
+                    cell.setFont(font)
+                    cell.setToolTip(f"{value}\n{self.t('open_repo_tooltip')}")
+                elif column in {1, 2, 4}:
+                    cell.setTextAlignment(Qt.AlignCenter)
+                self.repo_history_table.setItem(row, column, cell)
 
     def _reconcile_jobs_with_disk(self) -> bool:
         changed = False
@@ -935,6 +1090,7 @@ class MainWindow(QWidget):
 
     def _persist(self):
         self.settings["jobs"] = self.jobs[:300]
+        self.settings["repo_history"] = self.repo_history[:500]
         self.settings["expanded_jobs"] = list(self.expanded_jobs)
         if hasattr(self, "query_input"):
             self.settings["last_query"] = self.query_input.text().strip()
@@ -1356,6 +1512,7 @@ class MainWindow(QWidget):
                 self.jobs = [existing_job] + [
                     job for job in self.jobs if job.get("id") != existing_job.get("id")
                 ]
+                self._remember_repo_history(existing_job)
                 self._persist()
                 self._refresh_jobs_table()
                 self._start_next_queued_job()
@@ -1393,6 +1550,7 @@ class MainWindow(QWidget):
             "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         self.jobs.insert(0, job)
+        self._remember_repo_history(job)
         self._persist()
         self._refresh_jobs_table()
         self._start_next_queued_job()
@@ -1564,24 +1722,66 @@ class MainWindow(QWidget):
             f"QProgressBar::chunk {{ background-color: {color}; }}"
         )
 
+    def _open_repo_after_second_click(self, source: str, key: str, repo_id: str, repo_type: str):
+        target = (source, key)
+        if self._pending_repo_link == target:
+            self._pending_repo_link = None
+            QDesktopServices.openUrl(QUrl(make_repo_url(repo_id, repo_type)))
+            return
+        self._pending_repo_link = target
+        self.status_label.setText(self.t("open_repo_second_click"))
+
     def _jobs_table_clicked(self, row: int, column: int):
         item = self.jobs_table.item(row, column)
         if not item:
             return
         job_id = item.data(Qt.UserRole)
         if not job_id:
+            self._pending_repo_link = None
             return
         job = self._find_job(job_id)
         if not job:
+            self._pending_repo_link = None
             return
         if column == 0:
+            self._pending_repo_link = None
             if job.get("file_progress") or job.get("files"):
                 self.toggle_job_expanded(job_id)
             return
         if column != 1:
+            self._pending_repo_link = None
             return
-        QDesktopServices.openUrl(
-            QUrl(make_repo_url(job.get("repo_id", ""), job.get("repo_type", "model")))
+        self._open_repo_after_second_click(
+            "jobs",
+            job_id,
+            job.get("repo_id", ""),
+            job.get("repo_type", "model"),
+        )
+
+    def _repo_history_table_clicked(self, row: int, column: int):
+        item = self.repo_history_table.item(row, column)
+        if not item:
+            return
+        index = item.data(Qt.UserRole)
+        if index is None or index >= len(self.repo_history):
+            self._pending_repo_link = None
+            return
+        history_item = self.repo_history[index]
+        if column != 0:
+            self._pending_repo_link = None
+            return
+        key = "|".join(
+            [
+                history_item.get("repo_id", ""),
+                history_item.get("repo_type", "model"),
+                history_item.get("revision", "main"),
+            ]
+        )
+        self._open_repo_after_second_click(
+            "repo_history",
+            key,
+            history_item.get("repo_id", ""),
+            history_item.get("repo_type", "model"),
         )
 
     def _job_file_progress(self, job: Dict) -> List[Dict]:
